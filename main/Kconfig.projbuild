@@ -1,0 +1,191 @@
+menu "I2S PDM Example Configuration"
+
+    choice EXAMPLE_PDM_DIR
+        prompt "I2S PDM direction"
+        default EXAMPLE_PDM_TX
+        help
+            Select example PDM direction
+
+        config EXAMPLE_PDM_TX
+            bool "PDM TX"
+            depends on SOC_I2S_SUPPORTS_PDM_TX
+            help
+                PDM TX example will play 'twinkle twinkle little star' in three tones.
+
+        config EXAMPLE_PDM_RX
+            bool "PDM RX"
+            depends on SOC_I2S_SUPPORTS_PDM_RX
+            help
+                PDM RX example will show the received data from a PDM microphone.
+    endchoice
+
+    choice EXAMPLE_PDM_TX_LINE_MODE
+        prompt "I2S PDM TX Line Mode"
+        depends on EXAMPLE_PDM_TX && SOC_I2S_HW_VERSION_2
+        default EXAMPLE_PDM_TX_CODEC
+        help
+            Decide to output PDM signal into a PDM codec or a low-pass filter
+
+        config EXAMPLE_PDM_TX_CODEC
+            bool "Codec line mode"
+            help
+                Output PDM signal to a PDM codec. The PDM clock signal is mandatory for PDM codec,
+                the codec can differentiate the left and right sound channels by sampling data
+                on positive or negative edges. That means the data of the left and right channels
+                can coexist on a same data line.
+
+        config EXAMPLE_PDM_TX_DAC
+            bool "DAC line mode"
+            help
+                Output PDM signal to a low-pass filter, so that the low-pass filter can restore the PDM
+                signal to analog wave. Therefore, each data line can only contains one sound channel,
+                if both left and right channels are required, two data lines should be specified as well.
+                Normally the PDM signal is not sufficient in DAC line mode.
+    endchoice
+
+endmenu
+
+menu "AGC Configuration"
+
+    choice AGC_BACKEND
+        prompt "ALC Backend"
+        default AGC_BACKEND_CUSTOM
+        help
+            Select the automatic level control (ALC) implementation.
+            Manual gain (see below) is applied AFTER this stage.
+
+        config AGC_BACKEND_CUSTOM
+            bool "Custom software AGC"
+            help
+                Lightweight custom AGC with peak envelope detection,
+                compression ratio, noise gate, and soft clipping.
+                Zero external dependencies. ~1-2% CPU at 48kHz stereo.
+
+        config AGC_BACKEND_ESP_AE
+            bool "esp_audio_effects ALC"
+            help
+                Uses the Espressif esp_audio_effects ALC module.
+                Requires espressif/esp_audio_effects component in idf_component.yml.
+                ~3-5% CPU at 48kHz stereo, <5KB heap. Prebuilt SIMD-optimized library.
+
+        config AGC_BACKEND_NONE
+            bool "No ALC (pass-through)"
+            help
+                Disable automatic level control. Manual gain still applies if enabled.
+    endchoice
+
+    config AGC_ENABLED
+        bool
+        default y if AGC_BACKEND_CUSTOM || AGC_BACKEND_ESP_AE
+        default n if AGC_BACKEND_NONE
+
+    config AGC_TARGET_LEVEL_DB
+        float "Target level (dBFS)"
+        default -6.0
+        range -30.0 0.0
+        depends on AGC_ENABLED
+        help
+            Desired output level relative to full scale.
+            -6 dBFS = ~50% full scale. Lower values = more headroom,
+            but quieter output. Higher values = louder but less headroom
+            for transients.
+
+    config AGC_MAX_GAIN_DB
+        float "Maximum gain (dB)"
+        default 12.0
+        range 0.0 63.0
+        depends on AGC_ENABLED
+        help
+            Maximum gain applied to the signal.
+            Lower values prevent over-amplifying background noise.
+            12 dB = 4x amplification. 24 dB = 16x (very aggressive).
+
+    config AGC_COMPRESSION_RATIO
+        float "Compression ratio"
+        default 0.5
+        range 0.0 1.0
+        depends on AGC_ENABLED
+        help
+            How much to compensate for level differences.
+            1.0 = full AGC (target/envelope, aggressively amplifies quiet signals).
+            0.5 = half compensation (gentle, preserves some dynamics).
+            0.0 = bypass (no gain changes).
+            Lower values reduce how much room noise is amplified.
+
+    config AGC_SILENCE_THRESHOLD_DB
+        float "Silence threshold (dBFS)"
+        default -35.0
+        range -60.0 -10.0
+        depends on AGC_ENABLED
+        help
+            Envelope level below which signals get unity gain (no amplification).
+            Room noise below this threshold is preserved at its natural level.
+            Set higher to prevent more background noise from being amplified.
+            Set lower to allow quieter speech to be boosted.
+
+    config AGC_ATTACK_MS
+        float "Attack time (ms)"
+        default 5.0
+        range 1.0 50.0
+        depends on AGC_ENABLED
+        help
+            How fast the AGC responds to increasing signal levels.
+            Shorter values react faster to sudden loud sounds to prevent
+            clipping. Too short may cause distortion on low frequencies.
+
+    config AGC_RELEASE_MS
+        float "Release time (ms)"
+        default 200.0
+        range 50.0 1000.0
+        depends on AGC_ENABLED
+        help
+            How fast the AGC releases gain reduction after loud sounds.
+            Longer = smoother, less pumping. Shorter = recovers faster
+            after a loud sound ends.
+
+    config AGC_NOISE_GATE_DB
+        float "Noise gate threshold (dBFS)"
+        default -60.0
+        range -90.0 -10.0
+        depends on AGC_ENABLED
+        help
+            Signals below this level are muted (gain = 0).
+            This is for extreme low-level noise suppression, NOT for
+            general room noise. For room noise control, adjust the
+            Silence Threshold instead.
+
+endmenu
+
+menu "Manual Gain Control (applied after ALC)"
+
+    config MANUAL_GAIN_ENABLE
+        bool "Enable manual gain control"
+        default y
+        help
+            Adds a manual gain stage after ALC processing in the pipeline:
+            PDM -> ALC -> Manual Gain -> USB.
+            Gain is controlled by the host PC's microphone volume slider (0-100).
+            Volume 0 maps to min_gain_dB, Volume 100 maps to max_gain_dB.
+
+    config MANUAL_GAIN_MIN_DB
+        float "Minimum gain (dB) at volume=0"
+        default 0.0
+        range -96.0 63.0
+        depends on MANUAL_GAIN_ENABLE
+        help
+            Gain applied when host volume slider is at 0.
+            0 dB = unity (no change).
+            -96 dB = effectively muted.
+            Negative values let the slider attenuate below unity.
+
+    config MANUAL_GAIN_MAX_DB
+        float "Maximum gain (dB) at volume=100"
+        default 24.0
+        range -96.0 63.0
+        depends on MANUAL_GAIN_ENABLE
+        help
+            Gain applied when host volume slider is at 100.
+            24 dB = 16x amplification. Should be >= min_gain_dB.
+            Lower values give finer control; higher values give more range.
+
+endmenu

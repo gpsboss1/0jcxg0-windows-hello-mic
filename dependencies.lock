@@ -1,0 +1,87 @@
+dependencies:
+  espressif/cmake_utilities:
+    component_hash: 05165f30922b422b4b90c08845e6d449329b97370fbd06309803d8cb539d79e3
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.1'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.1.1
+  espressif/esp_audio_effects:
+    component_hash: 5100f213c4cbf8da79cfceceb2fd0e8fe2bb5dc84c0a3027b1f7c949855c0594
+    dependencies:
+    - name: espressif/gmf_fft
+      registry_url: https://components.espressif.com
+      require: private
+      version: ~1.0
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.4.0
+  espressif/gmf_fft:
+    component_hash: b59451ef2f96d22b80c27a162515b21f1b85954dda434c0b092172164028779d
+    dependencies: []
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.0.0
+  espressif/tinyusb:
+    component_hash: a40b7f67df6ac254a4afd96c6401cc56f2059ae747d6d7e66b568bca53ad0edc
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    targets:
+    - esp32s2
+    - esp32s3
+    - esp32p4
+    - esp32h4
+    - esp32s31
+    version: 0.19.0~3
+  espressif/usb_device_uac:
+    component_hash: e4665bee61baaee5e06acae662438ffd5ad794ce6d44b10c30173e9940b80896
+    dependencies:
+    - name: espressif/cmake_utilities
+      registry_url: https://components.espressif.com
+      require: private
+      version: '*'
+    - name: espressif/tinyusb
+      registry_url: https://components.espressif.com
+      require: private
+      version: ^0.19.0~3
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    targets:
+    - esp32s2
+    - esp32s3
+    - esp32p4
+    - esp32s31
+    - esp32h4
+    version: 1.3.1
+  i2s_examples_common:
+    dependencies: []
+    source:
+      path: ../../../application/installation/esp_602/v6.0.2/esp-idf/examples/peripherals/i2s/i2s_examples_common
+      type: local
+    version: '*'
+  idf:
+    source:
+      type: idf
+    version: 6.0.2
+direct_dependencies:
+- espressif/cmake_utilities
+- espressif/esp_audio_effects
+- espressif/usb_device_uac
+- i2s_examples_common
+manifest_hash: 58b93a858f8f109fe7de73ad80a5b87f64a40bbc55c7f2b0c9b3bf34ca76769e
+target: esp32s3
+version: 3.0.0
