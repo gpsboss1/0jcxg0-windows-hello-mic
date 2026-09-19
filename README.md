@@ -50,17 +50,12 @@ idf.py -p PORT flash monitor
 | `espressif/usb_device_uac` | ^1.3.1 | UAC 设备驱动（TinyUSB 封装） |
 | `espressif/esp_audio_effects` | ^1.0.0 | ALC 自动电平控制 |
 | `espressif/cmake_utilities` | ^1.1.1 | ESP 组件构建工具 |
-| `i2s_examples_common` | IDF 本地路径 | I2S 引脚公共定义（仅单声道路径使用） |
 
 ## 配置（menuconfig）
 
 ```
 idf.py menuconfig
 ```
-
-### I2S PDM Example Configuration
-
-- `EXAMPLE_PDM_DIR`：PDM 方向选择（当前使用 PDM RX）
 
 ### AGC Configuration（自动电平控制）
 
@@ -93,7 +88,6 @@ idf.py menuconfig
 ├── main/
 │   ├── i2s_pdm_example_main.c   # 主入口：初始化 PDM 通道 + ALC + 手动增益 + UAC
 │   ├── i2s_pdm_rx_stereo.c      # 双声道 PDM RX 初始化（GPIO6/GPIO5，clk_inv 交换声道）
-│   ├── i2s_pdm_rx.c             # 单声道 PDM RX 初始化（遗留，可用于调试）
 │   ├── i2s_pdm_tx.c             # PDM TX（遗留，当前未使用）
 │   ├── agc_processor.c/.h       # ALC 封装（支持 esp_audio_effects / 自定义 / 关闭 三种后端）
 │   ├── manual_gain.c/.h         # 宿主音量 → 线性增益

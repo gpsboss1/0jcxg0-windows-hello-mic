@@ -15,15 +15,10 @@
 #include "esp_log.h"
 #include "sdkconfig.h"
 #include "i2s_pdm_example.h"
-#include "i2s_example_pins.h"
 
-#if 0
-#define EXAMPLE_PDM_RX_CLK_IO           EXAMPLE_I2S_BCLK_IO1      // I2S PDM RX clock io number
-#define EXAMPLE_PDM_RX_DIN_IO           EXAMPLE_I2S_DIN_IO1      // I2S PDM RX data in io number
-#else
+/* PCB 专用的双声道 PDM 引脚定义。 */
 #define EXAMPLE_PDM_RX_CLK_IO           GPIO_NUM_6      // I2S PDM RX clock io number
 #define EXAMPLE_PDM_RX_DIN_IO           GPIO_NUM_5      // I2S PDM RX data in io number
-#endif
 
 #define EXAMPLE_PDM_RX_FREQ_HZ          48000           // I2S PDM RX frequency
 

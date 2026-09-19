@@ -13,25 +13,6 @@
 extern "C" {
 #endif
 
-#define EXAMPLE_BUFF_SIZE   4096//2048
-
-/**
- * @brief I2S PDM TX example task
- *
- * @param args  The user data given from task creating, not used in this example
- */
-void i2s_example_pdm_tx_task(void *args);
-
-/**
- * @brief I2S PDM RX example task
- *
- * @param args  The user data given from task creating, not used in this example
- */
-void i2s_example_pdm_rx_task(void *args);
-
-
-i2s_chan_handle_t i2s_example_init_pdm_rx(void);
-
 /**
  * @brief Initialize I2S PDM RX channel for stereo microphone
  *

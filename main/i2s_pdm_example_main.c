@@ -39,9 +39,10 @@ typedef struct {
 
 static audio_pipeline_t s_pipeline = { 0 };
 
-// 双声道配置
-#define STEREO_CHANNELS 2
-#define MONO_CHANNELS 1
+/* 当前固件固定使用双声道 PDM 麦克风，音频热路径按交错立体声帧处理。 */
+#if CONFIG_UAC_MIC_CHANNEL_NUM != 2
+#error "This project supports stereo microphones only (CONFIG_UAC_MIC_CHANNEL_NUM must be 2)"
+#endif
 
 //host->device
 static esp_err_t uac_device_output_cb(uint8_t *buf, size_t len, void *arg)
@@ -137,28 +138,9 @@ void process_stereo_audio_data(int16_t *data, size_t len)
 void app_main(void)
 {
     ESP_LOGI(TAG, "Software written by kojak_xyz@2925.com. Commercial use prohibited.");
-    #if 0
-#if CONFIG_EXAMPLE_PDM_TX
-    printf("I2S PDM TX example start\n---------------------------\n");
-    xTaskCreate(i2s_example_pdm_tx_task, "i2s_example_pdm_tx_task", 4096, NULL, 5, NULL);
-#elif CONFIG_EXAMPLE_PDM_RX
-    printf("I2S PDM RX example start\n---------------------------\n");
-    xTaskCreate(i2s_example_pdm_rx_task, "i2s_example_pdm_rx_task", 4096, NULL, 5, NULL);
-#endif
-    #else
-
-    // 根据声道数选择初始化函数
-    if (CONFIG_UAC_MIC_CHANNEL_NUM == 2)
-    {
-        ESP_LOGI(TAG, "Initializing stereo PDM microphone...");
-        // 这里需要调用双声道初始化函数
-        m_rx_chan = i2s_example_init_pdm_rx_stereo();
-    }
-    else
-    {
-        ESP_LOGI(TAG, "Initializing mono PDM microphone...");
-        m_rx_chan = i2s_example_init_pdm_rx();
-    }
+    /* 初始化固定的双声道 PDM 麦克风通道。 */
+    ESP_LOGI(TAG, "Initializing stereo PDM microphone...");
+    m_rx_chan = i2s_example_init_pdm_rx_stereo();
     
     assert(m_rx_chan != NULL);
 
@@ -215,6 +197,4 @@ void app_main(void)
 
     uac_device_init(&config);
     ESP_LOGI(TAG, "uac_device_init done");
-
-    #endif
 }
