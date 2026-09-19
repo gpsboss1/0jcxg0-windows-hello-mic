@@ -12,6 +12,7 @@
 #include "freertos/task.h"
 #include "sdkconfig.h"
 #include "i2s_pdm_example.h"
+#include "lywsd03mmc_gateway.h"
 
 #include "esp_err.h"
 #include "esp_log.h"
@@ -197,4 +198,11 @@ void app_main(void)
 
     uac_device_init(&config);
     ESP_LOGI(TAG, "uac_device_init done");
+
+    /* 在 USB 音频设备启动后运行温湿度计网关，避免阻塞音频热路径。 */
+    esp_err_t gateway_ret = lywsd03mmc_gateway_start();
+    if (gateway_ret != ESP_OK) {
+        ESP_LOGE(TAG, "lywsd03mmc gateway start failed: %s",
+                 esp_err_to_name(gateway_ret));
+    }
 }

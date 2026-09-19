@@ -4,6 +4,7 @@ idf_component_register(
         "i2s_pdm_rx_stereo.c"
         "agc_processor.c"
         "manual_gain.c"
+        "lywsd03mmc_gateway.c"
 
     INCLUDE_DIRS
         "."
@@ -12,5 +13,11 @@ idf_component_register(
         esp_driver_i2s
         esp_driver_gpio
         esp_timer
+        bt
+        esp_wifi
+        esp_event
+        esp_netif
+        nvs_flash
+        mqtt
         usb_device_uac
 )
