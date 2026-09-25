@@ -1,6 +1,7 @@
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -55,6 +56,8 @@
 #define BLE_READY_BIT BIT1
 #define BLE_RESULT_OK_BIT BIT0
 #define BLE_RESULT_FAILED_BIT BIT1
+#define BLE_DISCONNECTED_BIT BIT2
+#define BLE_CONNECT_COMPLETE_BIT BIT3
 
 static const char *TAG = "lywsd03mmc";
 
@@ -66,6 +69,7 @@ static const uint32_t kMaximumIntervalMinutes = 1440U;
 static const uint32_t kWifiConnectTimeoutMs = 20000U;
 static const uint32_t kBleScanDurationMs = 5000U;
 static const uint32_t kBleConnectTimeoutMs = 30000U;
+static const uint32_t kBleDisconnectTimeoutMs = 5000U;
 static const uint8_t kBleReadAttempts = 3U;
 
 static const ble_uuid_t *kSensorServiceUuid =
@@ -103,14 +107,14 @@ static volatile bool s_mqtt_connected;
 static volatile bool s_immediate_measurement_requested;
 static uint64_t s_last_measurement_ms;
 
-static bool s_ble_ready;
+static atomic_bool s_ble_ready;
 static uint8_t s_ble_own_addr_type;
-static bool s_ble_operation_active;
+static atomic_bool s_ble_operation_active;
 static bool s_ble_measurement_valid;
 static bool s_selected_sensor_valid;
 static int8_t s_strongest_sensor_rssi = -127;
 static ble_addr_t s_selected_sensor_addr;
-static uint16_t s_active_connection_handle = BLE_HS_CONN_HANDLE_NONE;
+static _Atomic uint16_t s_active_connection_handle = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t s_sensor_service_start;
 static uint16_t s_sensor_service_end;
 static uint16_t s_measurement_value_handle;
@@ -475,6 +479,12 @@ static void ble_on_sync(void)
 static void ble_on_reset(int reason)
 {
     s_ble_ready = false;
+    if (atomic_exchange(&s_ble_operation_active, false)) {
+        xEventGroupSetBits(s_ble_result_events, BLE_RESULT_FAILED_BIT);
+    }
+    s_active_connection_handle = BLE_HS_CONN_HANDLE_NONE;
+    xEventGroupSetBits(s_ble_result_events,
+                       BLE_DISCONNECTED_BIT | BLE_CONNECT_COMPLETE_BIT);
     ESP_LOGW(TAG, "BLE host reset: %d", reason);
 }
 
@@ -511,12 +521,56 @@ static esp_err_t init_ble(void)
 // 标记 BLE 读取失败并唤醒网关任务。
 static void finish_ble_failure(int status)
 {
-    if (!s_ble_operation_active) {
+    if (!atomic_exchange(&s_ble_operation_active, false)) {
         return;
     }
-    s_ble_operation_active = false;
+    /* 已建立连接时主动断开，否则下次扫描可能一直选中已连接的设备。 */
+    if (s_active_connection_handle != BLE_HS_CONN_HANDLE_NONE) {
+        ble_gap_terminate(s_active_connection_handle, BLE_ERR_REM_USER_CONN_TERM);
+    }
     ESP_LOGW(TAG, "BLE read failed: %d", status);
     xEventGroupSetBits(s_ble_result_events, BLE_RESULT_FAILED_BIT);
+}
+
+// 取消超时的 GAP 操作，并等待当前连接关闭后才允许下一次重试。
+static bool stop_ble_attempt(void)
+{
+    s_ble_operation_active = false;
+    ble_gap_disc_cancel();
+
+    const int cancel_rc = ble_gap_conn_cancel();
+    if (cancel_rc == 0) {
+        const EventBits_t bits = xEventGroupWaitBits(
+            s_ble_result_events, BLE_CONNECT_COMPLETE_BIT, pdTRUE, pdFALSE,
+            pdMS_TO_TICKS(kBleDisconnectTimeoutMs));
+        if ((bits & BLE_CONNECT_COMPLETE_BIT) == 0U) {
+            ESP_LOGW(TAG, "BLE connect cancel timed out");
+            return false;
+        }
+    } else if (cancel_rc != BLE_HS_EALREADY && ble_gap_conn_active()) {
+        ESP_LOGW(TAG, "BLE connect cancel failed: %d", cancel_rc);
+        return false;
+    }
+
+    const uint16_t conn_handle = s_active_connection_handle;
+    if (conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        return true;
+    }
+
+    const int rc = ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+    if (rc == BLE_HS_ENOTCONN) {
+        s_active_connection_handle = BLE_HS_CONN_HANDLE_NONE;
+        return true;
+    }
+    const EventBits_t bits = xEventGroupWaitBits(s_ble_result_events,
+                                                  BLE_DISCONNECTED_BIT, pdTRUE,
+                                                  pdFALSE,
+                                                  pdMS_TO_TICKS(kBleDisconnectTimeoutMs));
+    if ((bits & BLE_DISCONNECTED_BIT) == 0U) {
+        ESP_LOGW(TAG, "BLE disconnect timed out: %d", rc);
+        return false;
+    }
+    return true;
 }
 
 // 发现目标服务后继续发现温湿度特征值。
@@ -526,6 +580,9 @@ static int on_sensor_service(uint16_t conn_handle,
                              void *arg)
 {
     (void)arg;
+    if (!s_ble_operation_active) {
+        return 0;
+    }
     if (error->status == 0 && service != NULL) {
         s_sensor_service_start = service->start_handle;
         s_sensor_service_end = service->end_handle;
@@ -556,6 +613,9 @@ static int on_measurement_characteristic(uint16_t conn_handle,
                                          void *arg)
 {
     (void)arg;
+    if (!s_ble_operation_active) {
+        return 0;
+    }
     if (error->status == 0 && characteristic != NULL) {
         if ((characteristic->properties & BLE_GATT_CHR_PROP_READ) != 0U) {
             s_measurement_value_handle = characteristic->val_handle;
@@ -586,6 +646,9 @@ static int on_measurement_read(uint16_t conn_handle,
                                void *arg)
 {
     (void)arg;
+    if (!s_ble_operation_active) {
+        return 0;
+    }
     if (error->status != 0 || attr == NULL || attr->om == NULL ||
         os_mbuf_len(attr->om) < 5U) {
         finish_ble_failure(error->status != 0 ? error->status : BLE_HS_EINVAL);
@@ -599,13 +662,15 @@ static int on_measurement_read(uint16_t conn_handle,
         return 0;
     }
 
+    if (!atomic_exchange(&s_ble_operation_active, false)) {
+        return 0;
+    }
     s_ble_measurement_valid = true;
-    s_ble_operation_active = false;
-    xEventGroupSetBits(s_ble_result_events, BLE_RESULT_OK_BIT);
     ESP_LOGI(TAG, "temperature=%.1fC humidity=%u%% battery=%umV",
              s_ble_measurement.temperature_c, s_ble_measurement.humidity,
              s_ble_measurement.battery_mv);
     ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+    xEventGroupSetBits(s_ble_result_events, BLE_RESULT_OK_BIT);
     return 0;
 }
 
@@ -615,7 +680,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
     (void)arg;
     switch (event->type) {
     case BLE_GAP_EVENT_DISC:
-        if (is_sensor_advertisement(&event->disc) &&
+        if (s_ble_operation_active && is_sensor_advertisement(&event->disc) &&
             (!s_selected_sensor_valid || event->disc.rssi > s_strongest_sensor_rssi)) {
             s_selected_sensor_addr = event->disc.addr;
             s_selected_sensor_valid = true;
@@ -627,6 +692,9 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         }
         return 0;
     case BLE_GAP_EVENT_DISC_COMPLETE: {
+        if (!s_ble_operation_active) {
+            return 0;
+        }
         if (!s_selected_sensor_valid) {
             finish_ble_failure(BLE_HS_ENOENT);
             return 0;
@@ -639,6 +707,14 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         return 0;
     }
     case BLE_GAP_EVENT_CONNECT:
+        if (!s_ble_operation_active) {
+            if (event->connect.status == 0) {
+                s_active_connection_handle = event->connect.conn_handle;
+                ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+            }
+            xEventGroupSetBits(s_ble_result_events, BLE_CONNECT_COMPLETE_BIT);
+            return 0;
+        }
         if (event->connect.status != 0) {
             finish_ble_failure(event->connect.status);
             return 0;
@@ -653,8 +729,11 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         }
         return 0;
     case BLE_GAP_EVENT_DISCONNECT:
-        s_active_connection_handle = BLE_HS_CONN_HANDLE_NONE;
-        finish_ble_failure(event->disconnect.reason);
+        if (event->disconnect.conn.conn_handle == s_active_connection_handle) {
+            s_active_connection_handle = BLE_HS_CONN_HANDLE_NONE;
+            xEventGroupSetBits(s_ble_result_events, BLE_DISCONNECTED_BIT);
+            finish_ble_failure(event->disconnect.reason);
+        }
         return 0;
     default:
         return 0;
@@ -668,13 +747,21 @@ static bool read_sensor_measurement(measurement_t *measurement)
         return false;
     }
 
+    /* 上一次断开超时的连接必须先完成清理，避免重复连接同一设备。 */
+    if ((s_active_connection_handle != BLE_HS_CONN_HANDLE_NONE ||
+         ble_gap_conn_active() || ble_gap_disc_active()) &&
+        !stop_ble_attempt()) {
+        return false;
+    }
+
     for (uint8_t attempt = 1U; attempt <= kBleReadAttempts; ++attempt) {
         s_selected_sensor_valid = false;
         s_strongest_sensor_rssi = -127;
         s_ble_measurement_valid = false;
         s_ble_operation_active = true;
         xEventGroupClearBits(s_ble_result_events,
-                             BLE_RESULT_OK_BIT | BLE_RESULT_FAILED_BIT);
+                             BLE_RESULT_OK_BIT | BLE_RESULT_FAILED_BIT |
+                                 BLE_DISCONNECTED_BIT | BLE_CONNECT_COMPLETE_BIT);
 
         struct ble_gap_disc_params scan_params = {0};
         scan_params.filter_duplicates = 0;
@@ -689,8 +776,13 @@ static bool read_sensor_measurement(measurement_t *measurement)
                 pdTRUE, pdFALSE, pdMS_TO_TICKS(kBleScanDurationMs + 30000U));
             if ((result & BLE_RESULT_OK_BIT) != 0U && s_ble_measurement_valid) {
                 *measurement = s_ble_measurement;
+                stop_ble_attempt();
                 return true;
             }
+        }
+
+        if (!stop_ble_attempt()) {
+            break;
         }
 
         if (attempt < kBleReadAttempts) {

@@ -42,11 +42,15 @@ enum {
 const uint8_t spk_resolutions_per_format[CFG_TUD_AUDIO_FUNC_1_N_FORMATS] = {CFG_TUD_AUDIO_FUNC_1_FORMAT_1_RESOLUTION_RX};
 const uint8_t mic_resolutions_per_format[CFG_TUD_AUDIO_FUNC_1_N_FORMATS] = {CFG_TUD_AUDIO_FUNC_1_FORMAT_1_RESOLUTION_TX};
 
+/* Size feature-unit state for either microphone or speaker channels, plus master channel 0. */
+#define UAC_CONTROL_CHANNELS ((CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX > CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_TX) \
+                              ? CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX : CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_TX)
+
 typedef struct {
     usb_phy_handle_t phy_hdl;
     uac_device_config_t user_cfg;
-    int8_t mute[CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX + 1];         // SPK feature unit (RX = OUT = SPK), +1 for master channel 0
-    int16_t volume[CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX + 1];      // SPK feature unit (RX = OUT = SPK), +1 for master channel 0
+    int8_t mute[UAC_CONTROL_CHANNELS + 1];                       // Master channel 0 + per-channel controls
+    int16_t volume[UAC_CONTROL_CHANNELS + 1];                    // Master channel 0 + per-channel controls
     uint8_t mic_buf1[CFG_TUD_AUDIO_FUNC_1_EP_IN_SW_BUF_SZ];      // Buffer for microphone data
     uint8_t mic_buf2[CFG_TUD_AUDIO_FUNC_1_EP_IN_SW_BUF_SZ];      // Buffer for microphone data
     uint8_t spk_buf[CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ];      // Buffer for speaker data
@@ -204,6 +208,8 @@ void tud_audio_feedback_params_cb(uint8_t func_id, uint8_t alt_itf, audio_feedba
 static bool tud_audio_feature_unit_get_request(uint8_t rhport, audio_control_request_t const *request)
 {
     TU_ASSERT(request->bEntityID == UAC2_ENTITY_SPK_FEATURE_UNIT);
+    /* Reject an invalid channel number before indexing feature-unit state. */
+    TU_VERIFY(request->bChannelNumber <= UAC_CONTROL_CHANNELS);
 
     if (request->bControlSelector == AUDIO_FU_CTRL_MUTE && request->bRequest == AUDIO_CS_REQ_CUR) {
         audio_control_cur_1_t mute1 = {
@@ -240,6 +246,8 @@ static bool tud_audio_feature_unit_set_request(uint8_t rhport, audio_control_req
 
     TU_ASSERT(request->bEntityID == UAC2_ENTITY_SPK_FEATURE_UNIT);
     TU_VERIFY(request->bRequest == AUDIO_CS_REQ_CUR);
+    /* Microphone-only configurations also use this feature-unit callback. */
+    TU_VERIFY(request->bChannelNumber <= UAC_CONTROL_CHANNELS);
 
     if (request->bControlSelector == AUDIO_FU_CTRL_MUTE) {
         TU_VERIFY(request->wLength == sizeof(audio_control_cur_1_t));

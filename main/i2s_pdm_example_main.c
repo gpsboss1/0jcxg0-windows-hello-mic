@@ -5,6 +5,7 @@
  */
 
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -30,6 +31,7 @@ static i2s_chan_handle_t m_rx_chan = NULL;
 
 /* Audio pipeline context passed to all UAC callbacks via cb_ctx */
 typedef struct {
+    atomic_bool muted;
 #if CONFIG_AGC_ENABLED
     agc_handle_t alc;
 #endif
@@ -65,6 +67,11 @@ static esp_err_t uac_device_input_cb(uint8_t *buf, size_t len, size_t *bytes_rea
 
     esp_err_t ret = i2s_channel_read(m_rx_chan, buf, len, bytes_read, 100);
     if (ret == ESP_OK && *bytes_read > 0) {
+        /* USB 静音与音量增益独立，取消静音后保留主机设定的音量。 */
+        if (atomic_load_explicit(&p->muted, memory_order_relaxed)) {
+            memset(buf, 0, *bytes_read);
+            return ESP_OK;
+        }
         /* 16-bit stereo interleaved: 4 bytes per sample-pair */
         size_t samples = *bytes_read / 4;
 
@@ -93,15 +100,8 @@ static esp_err_t uac_device_input_cb(uint8_t *buf, size_t len, size_t *bytes_rea
 static void uac_device_set_mute_cb(uint32_t mute, void *arg)
 {
     ESP_LOGI(TAG, "uac_device_set_mute_cb: %"PRIu32"", mute);
-#if CONFIG_MANUAL_GAIN_ENABLE
     audio_pipeline_t *p = (audio_pipeline_t *)arg;
-    if (mute && p->mg) {
-        mg_set_volume(p->mg, 0);  /* mute → gain at volume=0 (min_gain_dB) */
-    }
-    /* unmute: gain stays at whatever the host last set via volume */
-#else
-    (void)arg;
-#endif
+    atomic_store_explicit(&p->muted, mute != 0U, memory_order_relaxed);
 }
 
 static void uac_device_set_volume_cb(uint32_t volume, void *arg)
@@ -120,6 +120,11 @@ static void uac_device_set_volume_cb(uint32_t volume, void *arg)
 
 void process_stereo_audio_data(int16_t *data, size_t len)
 {
+    /* 与 USB 输入回调保持相同的静音语义。 */
+    if (atomic_load_explicit(&s_pipeline.muted, memory_order_relaxed)) {
+        memset(data, 0, len);
+        return;
+    }
     size_t samples = len / 4;
 
 #if CONFIG_AGC_ENABLED
