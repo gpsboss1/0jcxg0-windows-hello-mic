@@ -1,0 +1,5 @@
+# 2MB Flash 单应用布局：保留 NVS、PHY 分区，剩余空间全部用于应用。
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x6000,
+phy_init, data, phy,     0xf000,   0x1000,
+factory,  app,  factory, 0x10000,  0x1f0000,
