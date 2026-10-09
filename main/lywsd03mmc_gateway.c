@@ -67,6 +67,9 @@ static const uint32_t kDefaultIntervalMinutes = 60U;
 static const uint32_t kMinimumIntervalMinutes = 1U;
 static const uint32_t kMaximumIntervalMinutes = 1440U;
 static const uint32_t kWifiConnectTimeoutMs = 20000U;
+static const uint32_t kWifiQuickRetryDelayMs = 5000U;
+static const uint32_t kWifiSlowRetryDelayMs = 60000U;
+static const uint8_t kWifiQuickRetryCount = 3U;
 static const uint32_t kBleScanDurationMs = 5000U;
 static const uint32_t kBleConnectTimeoutMs = 30000U;
 static const uint32_t kBleDisconnectTimeoutMs = 5000U;
@@ -95,6 +98,12 @@ static EventGroupHandle_t s_ble_result_events;
 static TaskHandle_t s_gateway_task;
 static esp_mqtt_client_handle_t s_mqtt_client;
 static nvs_handle_t s_settings_nvs;
+
+// 重试状态仅由默认事件循环访问，定时器只负责投递事件。
+ESP_EVENT_DEFINE_BASE(WIFI_RETRY_EVENT);
+static esp_timer_handle_t s_wifi_retry_timer;
+static uint8_t s_wifi_quick_retries;
+static int64_t s_wifi_retry_deadline_us;
 
 static gateway_settings_t s_settings = {
     .auto_update = true,
@@ -257,20 +266,82 @@ static esp_err_t init_nvs(void)
     return ret;
 }
 
-// 处理 Wi-Fi 状态事件，并触发自动重连。
+// 只有 Wi-Fi 获取 IP 后才允许启动蓝牙扫描和连接。
+static bool wifi_is_connected(void)
+{
+    return (xEventGroupGetBits(s_gateway_events) & WIFI_CONNECTED_BIT) != 0;
+}
+
+// 定时器不等待事件队列；队列满时由下一个周期再次投递。
+static void wifi_retry_timer_callback(void *arg)
+{
+    (void)arg;
+    esp_event_post(WIFI_RETRY_EVENT, 0, NULL, 0, 0);
+}
+
+// 前三次重试各冷却 5 秒，持续失败后每次冷却 1 分钟。
+static void schedule_wifi_retry(void)
+{
+    if (s_wifi_retry_deadline_us != 0) {
+        return;
+    }
+
+    uint32_t delay_ms = kWifiSlowRetryDelayMs;
+    if (s_wifi_quick_retries < kWifiQuickRetryCount) {
+        ++s_wifi_quick_retries;
+        delay_ms = kWifiQuickRetryDelayMs;
+    }
+    const uint64_t delay_us = (uint64_t)delay_ms * 1000ULL;
+    s_wifi_retry_deadline_us = esp_timer_get_time() + (int64_t)delay_us;
+    const esp_err_t ret = esp_timer_start_periodic(s_wifi_retry_timer, delay_us);
+    if (ret != ESP_OK) {
+        s_wifi_retry_deadline_us = 0;
+        ESP_LOGE(TAG, "Wi-Fi retry timer failed: %s", esp_err_to_name(ret));
+        return;
+    }
+    ESP_LOGW(TAG, "Wi-Fi retry scheduled in %" PRIu32 " seconds", delay_ms / 1000U);
+}
+
+// 连接请求本身失败时也进入冷却，避免停止重试或连续调用。
+static void connect_wifi(void)
+{
+    const esp_err_t ret = esp_wifi_connect();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Wi-Fi connect request failed: %s", esp_err_to_name(ret));
+        schedule_wifi_retry();
+    }
+}
+
+// 在事件循环中处理冷却重试，成功获取 IP 后取消定时器并重置计数。
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data)
 {
     (void)arg;
     (void)event_data;
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
+    if (event_base == WIFI_RETRY_EVENT) {
+        // 忽略取消后残留的事件，以及上一轮冷却排队的过期事件。
+        if (s_wifi_retry_deadline_us == 0 ||
+            esp_timer_get_time() < s_wifi_retry_deadline_us) {
+            return;
+        }
+        esp_timer_stop(s_wifi_retry_timer);
+        s_wifi_retry_deadline_us = 0;
+        connect_wifi();
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        connect_wifi();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         xEventGroupClearBits(s_gateway_events, WIFI_CONNECTED_BIT);
         s_mqtt_connected = false;
-        esp_wifi_connect();
-        ESP_LOGW(TAG, "Wi-Fi disconnected, reconnecting");
+        // 唤醒正在采集的网关任务，由它取消扫描、连接并等待断开。
+        if (atomic_exchange(&s_ble_operation_active, false)) {
+            xEventGroupSetBits(s_ble_result_events, BLE_RESULT_FAILED_BIT);
+        }
+        ESP_LOGW(TAG, "Wi-Fi disconnected");
+        schedule_wifi_retry();
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        esp_timer_stop(s_wifi_retry_timer);
+        s_wifi_retry_deadline_us = 0;
+        s_wifi_quick_retries = 0;
         xEventGroupSetBits(s_gateway_events, WIFI_CONNECTED_BIT);
         ESP_LOGI(TAG, "Wi-Fi connected");
     }
@@ -301,6 +372,18 @@ static esp_err_t init_wifi(void)
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
         return ret;
     }
+    // 在启动 Wi-Fi 前准备冷却定时器，避免断线事件到达时尚未初始化。
+    const esp_timer_create_args_t retry_timer_args = {
+        .callback = wifi_retry_timer_callback,
+        .name = "wifi_retry",
+        .skip_unhandled_events = true,
+    };
+    ret = esp_timer_create(&retry_timer_args, &s_wifi_retry_timer);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_RETRY_EVENT, ESP_EVENT_ANY_ID,
+                                               &wifi_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
                                                &wifi_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
@@ -743,7 +826,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
 // 启动一次 BLE 扫描并读取最强信号的温湿度计。
 static bool read_sensor_measurement(measurement_t *measurement)
 {
-    if (!s_ble_ready || measurement == NULL) {
+    if (!wifi_is_connected() || !s_ble_ready || measurement == NULL) {
         return false;
     }
 
@@ -755,6 +838,9 @@ static bool read_sensor_measurement(measurement_t *measurement)
     }
 
     for (uint8_t attempt = 1U; attempt <= kBleReadAttempts; ++attempt) {
+        if (!wifi_is_connected()) {
+            return false;
+        }
         s_selected_sensor_valid = false;
         s_strongest_sensor_rssi = -127;
         s_ble_measurement_valid = false;
@@ -763,6 +849,11 @@ static bool read_sensor_measurement(measurement_t *measurement)
                              BLE_RESULT_OK_BIT | BLE_RESULT_FAILED_BIT |
                                  BLE_DISCONNECTED_BIT | BLE_CONNECT_COMPLETE_BIT);
 
+        // 设置读取状态期间也可能断网；此时不启动新的扫描。
+        if (!wifi_is_connected() || !s_ble_operation_active) {
+            stop_ble_attempt();
+            return false;
+        }
         struct ble_gap_disc_params scan_params = {0};
         scan_params.filter_duplicates = 0;
         scan_params.passive = 1;
@@ -785,6 +876,9 @@ static bool read_sensor_measurement(measurement_t *measurement)
             break;
         }
 
+        if (!wifi_is_connected()) {
+            return false;
+        }
         if (attempt < kBleReadAttempts) {
             vTaskDelay(pdMS_TO_TICKS(1000));
         }
@@ -808,11 +902,6 @@ static void gateway_task(void *arg)
         ESP_LOGW(TAG, "Wi-Fi init failed: %s", esp_err_to_name(wifi_ret));
     }
 
-    const esp_err_t ble_ret = init_ble();
-    if (ble_ret != ESP_OK) {
-        ESP_LOGW(TAG, "BLE init failed: %s", esp_err_to_name(ble_ret));
-    }
-
     const esp_err_t mqtt_ret = init_mqtt();
     if (mqtt_ret != ESP_OK && mqtt_ret != ESP_ERR_INVALID_STATE) {
         ESP_LOGW(TAG, "MQTT init failed: %s", esp_err_to_name(mqtt_ret));
@@ -821,7 +910,24 @@ static void gateway_task(void *arg)
     ESP_LOGI(TAG, "gateway ready: auto=%s interval=%" PRIu32 " minutes",
              s_settings.auto_update ? "on" : "off", s_settings.interval_minutes);
 
+    bool ble_initialization_attempted = false;
     while (true) {
+        // 离线期间不初始化蓝牙、不消耗采集请求，也不推进采集时间。
+        if (!wifi_is_connected()) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+        if (!ble_initialization_attempted) {
+            ble_initialization_attempted = true;
+            const esp_err_t ble_ret = init_ble();
+            if (ble_ret != ESP_OK) {
+                ESP_LOGW(TAG, "BLE init failed: %s", esp_err_to_name(ble_ret));
+            }
+        }
+        // 蓝牙初始化等待同步时可能断网，恢复后再执行采集。
+        if (!wifi_is_connected()) {
+            continue;
+        }
         publish_pending_measurement();
 
         const uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000LL);
@@ -837,6 +943,9 @@ static void gateway_task(void *arg)
                 s_pending_measurement = measurement;
                 s_pending_measurement_valid = true;
                 publish_pending_measurement();
+            } else if (!wifi_is_connected()) {
+                // 断网中断的采集在联网后补做，避免等待下一个完整周期。
+                s_immediate_measurement_requested = true;
             }
         }
 
