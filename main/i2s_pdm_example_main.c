@@ -9,14 +9,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "hal/usb_serial_jtag_ll.h"
 #include "sdkconfig.h"
+#include "soc/rtc_cntl_reg.h"
+#include "soc/soc.h"
 #include "i2s_pdm_example.h"
 #include "lywsd03mmc_gateway.h"
 
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_system.h"
+#include "tusb.h"
 #include "usb_device_uac.h"
 
 #if CONFIG_AGC_ENABLED
@@ -27,6 +33,7 @@
 #endif
 
 static const char *TAG = "app_usb_uac";
+static const gpio_num_t kBootGpio = GPIO_NUM_0;
 static i2s_chan_handle_t m_rx_chan = NULL;
 
 /* Audio pipeline context passed to all UAC callbacks via cb_ctx */
@@ -141,6 +148,57 @@ void process_stereo_audio_data(int16_t *data, size_t len)
 }
 
 
+/* 锁存 GPIO0 的下降沿，松开 BOOT 后通知仍然有效。 */
+static void boot_gpio_isr(void *arg)
+{
+    BaseType_t task_woken = pdFALSE;
+    vTaskNotifyGiveFromISR((TaskHandle_t)arg, &task_woken);
+    if (task_woken == pdTRUE) {
+        portYIELD_FROM_ISR();
+    }
+}
+
+/* 让主机识别 USB 音频设备已拔出，再将内部 PHY 交给 ROM 下载串口。 */
+static void boot_download_task(void *arg)
+{
+    (void)arg;
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    gpio_intr_disable(kBootGpio);
+
+    if (tud_inited()) {
+        tud_disconnect();
+        vTaskDelay(pdMS_TO_TICKS(30));
+    }
+    usb_serial_jtag_ll_phy_enable_external(false);
+    usb_serial_jtag_ll_phy_enable_pad(true);
+
+    /* 软件置位后由 ROM 选择下载模式，复位时 GPIO0 可以已经释放。 */
+    REG_SET_BIT(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
+    esp_restart();
+}
+
+/* 在 USB 音频初始化完成后启用板上的 BOOT 输入。 */
+static void init_boot_download(void)
+{
+    const gpio_config_t boot_gpio = {
+        .pin_bit_mask = 1ULL << kBootGpio,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .intr_type = GPIO_INTR_NEGEDGE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&boot_gpio));
+    ESP_ERROR_CHECK(gpio_install_isr_service(0));
+
+    TaskHandle_t task;
+    const BaseType_t created = xTaskCreate(boot_download_task, "boot_download",
+                                          3072, NULL, 6, &task);
+    ESP_ERROR_CHECK(created == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
+    ESP_ERROR_CHECK(gpio_isr_handler_add(kBootGpio, boot_gpio_isr, task));
+    if (gpio_get_level(kBootGpio) == 0) {
+        xTaskNotifyGive(task);
+    }
+}
+
 void app_main(void)
 {
     ESP_LOGI(TAG, "Software written by kojak_xyz@2925.com. Commercial use prohibited.");
@@ -203,6 +261,7 @@ void app_main(void)
 
     uac_device_init(&config);
     ESP_LOGI(TAG, "uac_device_init done");
+    init_boot_download();
 
     /* 在 USB 音频设备启动后运行温湿度计网关，避免阻塞音频热路径。 */
     esp_err_t gateway_ret = lywsd03mmc_gateway_start();

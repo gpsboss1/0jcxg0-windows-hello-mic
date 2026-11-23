@@ -20,4 +20,7 @@ idf_component_register(
         nvs_flash
         mqtt
         usb_device_uac
+    PRIV_REQUIRES
+        esp_hal_usb
+        espressif__tinyusb
 )

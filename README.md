@@ -52,6 +52,8 @@
 
 如无法连接，请先让 ESP32-S3 进入下载模式。摄像头驱动和 Windows Hello 设置可参考[原作者项目](https://oshwhub.com/kojak/project_xdwifdbb)。
 
+烧录支持此功能的固件后，板子运行时将 `BOOT`（GPIO0）短接到 `GND` 一下再松开，ESP32-S3 会重启到 ROM 下载模式。在 Windows 上选择重新出现的 USB Serial/JTAG 串口即可烧录。
+
 ## 温湿度网关
 
 固件源码支持通过蓝牙读取小米蓝牙温湿度计 2，并通过 Wi-Fi 和 MQTT 接入巴法云。通用固件未配置 Wi-Fi 和巴法云；需要该功能时，参考 `main/secrets.h.example` 创建 `main/secrets.h`，填写自己的配置后自行编译。
