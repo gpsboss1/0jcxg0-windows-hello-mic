@@ -1,0 +1,32 @@
+name: ESP32-S3 Firmware CI
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:v6.0.2
+    steps:
+      - name: 拉取仓库代码
+        uses: actions/checkout@v4
+
+      - name: 编译固件并生成合并镜像
+        run: |
+          idf.py build
+          idf.py merge-bin -o build/esp32s3-windows-hello-mic-merged.bin
+
+      - name: 上传编译产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32s3-windows-hello-mic-firmware
+          path: |
+            build/esp32s3-windows-hello-mic-merged.bin
+            build/*.bin
+            build/bootloader/*.bin
+            build/partition_table/*.bin
+            build/flash_args
