@@ -15,8 +15,10 @@ jobs:
       - name: 拉取仓库代码
         uses: actions/checkout@v4
 
-      - name: 编译固件并生成合并镜像
+      - name: 加载 ESP-IDF 环境并编译固件
+        shell: bash
         run: |
+          source $IDF_PATH/export.sh
           idf.py build
           idf.py merge-bin -o build/esp32s3-windows-hello-mic-merged.bin
 
